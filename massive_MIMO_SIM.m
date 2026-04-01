@@ -1,0 +1,436 @@
+%% ================================================================
+%  MASSIVE MIMO: Vanilla ZF vs Regularized ZF (MMSE-type)
+%  FINAL CORRECTED VERSION — All 5 figures
+%  Author: Apoorv | Wireless Communications Presentation
+%% ================================================================
+
+clc; clear; close all;
+
+%% ── GLOBAL PARAMETERS ───────────────────────────────────────────
+M                = 64;
+K                = 48;
+mod_order        = 16;
+num_bits_per_sym = log2(mod_order);   % = 4 bits/symbol
+num_symbols      = 20000;
+
+SNR_dB_vec  = 0:2:40;
+SNR_lin_vec = 10.^(SNR_dB_vec / 10);
+
+
+%% ================================================================
+%  SECTION A — BER vs SNR
+%  Fixed M=64, K=48, sweep SNR 0→40 dB
+%  ZF drops fast (good interference cancellation when SNR is enough)
+%  RZF starts poor at low SNR (over-regularizes) but recovers at high SNR
+%% ================================================================
+fprintf('\n--- SECTION A: BER vs SNR ---\n');
+
+BER_ZF_snr  = zeros(1, length(SNR_dB_vec));
+BER_RZF_snr = zeros(1, length(SNR_dB_vec));
+
+for snr_idx = 1:length(SNR_dB_vec)
+
+    SNR_lin   = SNR_lin_vec(snr_idx);
+    noise_var = 1 / SNR_lin;
+    err_ZF    = 0;
+    err_RZF   = 0;
+
+    for sym_trial = 1:num_symbols
+
+        % Generate bits and modulate
+        tx_bits  = randi([0 1], K, num_bits_per_sym);
+        tx_syms  = qammod(bi2de(tx_bits, 'left-msb'), mod_order, ...
+                          'UnitAveragePower', true);
+
+        % Rayleigh channel H ~ CN(0,1), size M×K
+        H     = (randn(M, K) + 1j*randn(M, K)) / sqrt(2);
+        noise = sqrt(noise_var/2) * (randn(M,1) + 1j*randn(M,1));
+        y     = H * tx_syms + noise;
+
+        % Vanilla ZF: G = (H'H)^{-1} H'
+        G_ZF      = (H'*H) \ (H');
+        x_hat_ZF  = G_ZF * y;
+
+        % Regularized ZF: G = (H'H + αI)^{-1} H',  α = K/SNR
+        alpha     = K / SNR_lin;
+        G_RZF     = (H'*H + alpha*eye(K)) \ (H');
+        x_hat_RZF = G_RZF * y;
+
+        % Demodulate and count errors
+        rx_bits_ZF  = de2bi(qamdemod(x_hat_ZF,  mod_order, ...
+                            'UnitAveragePower',true), num_bits_per_sym,'left-msb');
+        rx_bits_RZF = de2bi(qamdemod(x_hat_RZF, mod_order, ...
+                            'UnitAveragePower',true), num_bits_per_sym,'left-msb');
+
+        err_ZF  = err_ZF  + sum(sum(rx_bits_ZF  ~= tx_bits));
+        err_RZF = err_RZF + sum(sum(rx_bits_RZF ~= tx_bits));
+    end
+
+    total_bits          = num_symbols * K * num_bits_per_sym;
+    BER_ZF_snr(snr_idx)  = err_ZF  / total_bits;
+    BER_RZF_snr(snr_idx) = err_RZF / total_bits;
+
+    fprintf('SNR = %3d dB | BER_ZF = %.5f | BER_RZF = %.5f\n', ...
+            SNR_dB_vec(snr_idx), BER_ZF_snr(snr_idx), BER_RZF_snr(snr_idx));
+end
+
+%% ── PLOT A ──────────────────────────────────────────────────────
+figure('Name','Plot A: BER vs SNR','Color','white','Position',[50 50 750 500]);
+
+semilogy(SNR_dB_vec, max(BER_ZF_snr,  1e-6), 'r-o', 'LineWidth',2.5, ...
+         'MarkerSize',7, 'MarkerFaceColor','r', 'DisplayName','Vanilla ZF');
+hold on;
+semilogy(SNR_dB_vec, max(BER_RZF_snr, 1e-6), 'b-s', 'LineWidth',2.5, ...
+         'MarkerSize',7, 'MarkerFaceColor','b', ...
+         'DisplayName','Regularized ZF (MMSE-type)');
+
+% Theoretical 16-QAM AWGN reference (single user, no interference — ideal bound)
+BER_16QAM_theory = (3/8) * erfc(sqrt(SNR_lin_vec / 10));
+semilogy(SNR_dB_vec, max(BER_16QAM_theory,1e-6), 'k--', 'LineWidth',1.5, ...
+         'DisplayName','16-QAM AWGN bound (single user ideal)');
+
+grid on;
+xlabel('SNR (dB)',             'FontSize',13, 'FontWeight','bold');
+ylabel('Bit Error Rate (BER)', 'FontSize',13, 'FontWeight','bold');
+title(sprintf('BER vs SNR  |  M=%d antennas, K=%d users  |  16-QAM', M, K), ...
+      'FontSize',14);
+legend('Location','southwest','FontSize',11);
+ylim([1e-6 1]);
+xlim([SNR_dB_vec(1) SNR_dB_vec(end)]);
+set(gca,'FontSize',11);
+
+% Place annotation near the curves (fixed position)
+text(2, 5e-5, ...
+     {'ZF: good cancellation,', 'fails at high load (K/M=0.75)'}, ...
+     'Color','r','FontSize',8,'BackgroundColor','white','EdgeColor','r');
+text(12, 0.2, ...
+     {'RZF: over-regularizes', 'at low SNR, recovers high SNR'}, ...
+     'Color','b','FontSize',8,'BackgroundColor','white','EdgeColor','b');
+
+
+%% ================================================================
+%  SECTION B — BER vs NUMBER OF USERS K
+%  Fixed M=64, SNR=10 dB (reduced from 20→10 so ZF fails first)
+%  Sweep K from 4 to 62
+%  ZF should degrade BEFORE RZF — the correct expected result
+%% ================================================================
+fprintf('\n--- SECTION B: BER vs Number of Users ---\n');
+
+SNR_B_dB    = 10;                      % KEY: 10 dB makes ZF fail before RZF
+SNR_B_lin   = 10^(SNR_B_dB / 10);
+noise_var_B = 1 / SNR_B_lin;
+
+K_sweep     = 4:2:62;
+BER_ZF_K    = zeros(1, length(K_sweep));
+BER_RZF_K   = zeros(1, length(K_sweep));
+
+for k_idx = 1:length(K_sweep)
+
+    Kk = K_sweep(k_idx);
+
+    if Kk >= M
+        BER_ZF_K(k_idx)  = 0.5;
+        BER_RZF_K(k_idx) = 0.5;
+        fprintf('K = %2d | SKIPPED (K >= M)\n', Kk);
+        continue;
+    end
+
+    err_ZF  = 0;
+    err_RZF = 0;
+
+    for sym_trial = 1:num_symbols
+
+        tx_bits   = randi([0 1], Kk, num_bits_per_sym);
+        tx_syms   = qammod(bi2de(tx_bits,'left-msb'), mod_order, ...
+                           'UnitAveragePower',true);
+
+        H     = (randn(M,Kk) + 1j*randn(M,Kk)) / sqrt(2);
+        noise = sqrt(noise_var_B/2) * (randn(M,1) + 1j*randn(M,1));
+        y     = H * tx_syms + noise;
+
+        G_ZF      = (H'*H) \ (H');
+        x_hat_ZF  = G_ZF * y;
+
+        alpha     = Kk / SNR_B_lin;
+        G_RZF     = (H'*H + alpha*eye(Kk)) \ (H');
+        x_hat_RZF = G_RZF * y;
+
+        rx_bits_ZF  = de2bi(qamdemod(x_hat_ZF,  mod_order, ...
+                            'UnitAveragePower',true), num_bits_per_sym,'left-msb');
+        rx_bits_RZF = de2bi(qamdemod(x_hat_RZF, mod_order, ...
+                            'UnitAveragePower',true), num_bits_per_sym,'left-msb');
+
+        err_ZF  = err_ZF  + sum(sum(rx_bits_ZF  ~= tx_bits));
+        err_RZF = err_RZF + sum(sum(rx_bits_RZF ~= tx_bits));
+    end
+
+    total_bits_K      = num_symbols * Kk * num_bits_per_sym;
+    BER_ZF_K(k_idx)   = err_ZF  / total_bits_K;
+    BER_RZF_K(k_idx)  = err_RZF / total_bits_K;
+
+    fprintf('K = %2d | BER_ZF = %.5f | BER_RZF = %.5f\n', ...
+            Kk, BER_ZF_K(k_idx), BER_RZF_K(k_idx));
+end
+
+%% ── PLOT B ──────────────────────────────────────────────────────
+figure('Name','Plot B: BER vs Number of Users','Color','white','Position',[820 50 750 500]);
+
+semilogy(K_sweep, max(BER_ZF_K,  1e-6), 'r-o', 'LineWidth',2.5, ...
+         'MarkerSize',6, 'MarkerFaceColor','r', 'DisplayName','Vanilla ZF');
+hold on;
+semilogy(K_sweep, max(BER_RZF_K, 1e-6), 'b-s', 'LineWidth',2.5, ...
+         'MarkerSize',6, 'MarkerFaceColor','b', ...
+         'DisplayName','Regularized ZF (MMSE-type)');
+
+xline(M, 'k--', 'LineWidth',2, ...
+      'DisplayName', sprintf('K = M = %d  (singularity wall)', M));
+
+grid on;
+xlabel('Number of Users K',    'FontSize',13,'FontWeight','bold');
+ylabel('Bit Error Rate (BER)', 'FontSize',13,'FontWeight','bold');
+title(sprintf('BER vs Users  |  M=%d antennas, SNR=%d dB  |  16-QAM', M, SNR_B_dB), ...
+      'FontSize',14);
+legend('Location','northwest','FontSize',11);
+ylim([1e-6 1]);
+xlim([K_sweep(1)-1  M+2]);
+set(gca,'FontSize',11);
+
+% Annotations marking load zones
+text(10, 2e-6, 'Low load: both work fine', ...
+     'Color',[0.2 0.6 0.2],'FontSize',9,'BackgroundColor','white');
+text(50, 1e-3, {'High load:', 'ZF fails first'}, ...
+     'Color','r','FontSize',9,'BackgroundColor','white','EdgeColor','r');
+
+
+%% ================================================================
+%  SECTION C — CONDITION NUMBER vs K
+%  The mathematical proof of why ZF fails
+%  κ(H'H) = max_eigenvalue / min_eigenvalue
+%  Large κ → matrix inversion amplifies noise by factor κ
+%  RZF adds αI → smallest eigenvalue ≥ α → κ bounded
+%% ================================================================
+fprintf('\n--- SECTION C: Condition Number vs K ---\n');
+
+K_cond_range    = 4:2:62;
+num_cond_trials = 300;
+cond_mean = zeros(1, length(K_cond_range));
+cond_std  = zeros(1, length(K_cond_range));
+
+for k_idx = 1:length(K_cond_range)
+
+    Kk        = K_cond_range(k_idx);
+    cond_vals = zeros(1, num_cond_trials);
+
+    for t = 1:num_cond_trials
+        H            = (randn(M,Kk) + 1j*randn(M,Kk)) / sqrt(2);
+        cond_vals(t) = cond(H'*H);
+    end
+
+    cond_mean(k_idx) = mean(cond_vals);
+    cond_std(k_idx)  = std(cond_vals);
+
+    fprintf('K = %2d | mean κ(HᴴH) = %.2e\n', Kk, cond_mean(k_idx));
+end
+
+%% ── PLOT C (FIXED — force log y-axis after fill command) ────────
+figure('Name','Plot C: Condition Number','Color','white','Position',[50 580 750 450]);
+
+% Draw shaded std band FIRST (fill overrides axis type if not corrected)
+cond_upper = cond_mean + cond_std;
+cond_lower = max(cond_mean - cond_std, 1);
+fill([K_cond_range fliplr(K_cond_range)], ...
+     [cond_upper   fliplr(cond_lower)], ...
+     'm','FaceAlpha',0.15,'EdgeColor','none','DisplayName','±1 std deviation');
+hold on;
+
+% Explicitly set log scale IMMEDIATELY after fill, before any other plot
+set(gca, 'YScale', 'log');
+
+semilogy(K_cond_range, cond_mean, 'm-^', 'LineWidth',2.5, 'MarkerSize',7, ...
+         'MarkerFaceColor','m', 'DisplayName','Mean \kappa(H^HH)');
+
+xline(M,   'k--', 'LineWidth',2,   'DisplayName', sprintf('K = M = %d (singular)',M));
+yline(10,  'g:',  'LineWidth',1.5, 'DisplayName', '\kappa = 10 (manageable)');
+yline(1000,'r:',  'LineWidth',1.5, 'DisplayName', '\kappa = 10^3 (ZF breaks)');
+
+grid on;
+xlabel('Number of Users K',                  'FontSize',13,'FontWeight','bold');
+ylabel('\kappa(H^HH)  —  Condition Number',  'FontSize',13,'FontWeight','bold');
+title(sprintf('Condition Number of H^HH vs Users  |  M=%d', M), 'FontSize',14);
+legend('Location','northwest','FontSize',10);
+xlim([K_cond_range(1)-1  M+1]);
+ylim([1  1e5]);
+set(gca, 'YScale','log', 'FontSize',11);   % Force log again at end
+
+text(35, 50, ...
+     {'\kappa \rightarrow \infty  means', ...
+      'noise amplification \rightarrow \infty', ...
+      'ZF becomes useless'}, ...
+     'Color','r','FontSize',9, ...
+     'BackgroundColor',[1 0.95 0.95],'EdgeColor','r');
+
+%% ================================================================
+%  SECTION D — BER vs NUMBER OF ANTENNAS M
+%  Fixed K=32, SNR=15 dB — meaningful load, not trivially easy
+%  Sweep M from 32 (K=M, stressed) to 256 (massive MIMO regime)
+%  Shows: more antennas → better BER, ZF and RZF converge at large M
+%% ================================================================
+fprintf('\n--- SECTION D: BER vs Number of Antennas ---\n');
+
+K_D         = 32;
+SNR_D_dB    = 15;
+SNR_D       = 10^(SNR_D_dB / 10);
+noise_var_D = 1 / SNR_D;
+
+M_sweep_D   = [32 36 40 48 56 64 80 96 128 160 192 256];
+
+BER_ZF_M    = zeros(1, length(M_sweep_D));
+BER_RZF_M   = zeros(1, length(M_sweep_D));
+
+for m_idx = 1:length(M_sweep_D)
+
+    Mm = M_sweep_D(m_idx);
+
+    if Mm < K_D
+        BER_ZF_M(m_idx)  = 0.5;
+        BER_RZF_M(m_idx) = 0.5;
+        continue;
+    end
+
+    err_ZF  = 0;
+    err_RZF = 0;
+
+    for sym_trial = 1:num_symbols
+
+        tx_bits   = randi([0 1], K_D, num_bits_per_sym);
+        tx_syms   = qammod(bi2de(tx_bits,'left-msb'), mod_order, ...
+                           'UnitAveragePower',true);
+
+        H     = (randn(Mm,K_D) + 1j*randn(Mm,K_D)) / sqrt(2);
+        noise = sqrt(noise_var_D/2) * (randn(Mm,1) + 1j*randn(Mm,1));
+        y     = H * tx_syms + noise;
+
+        G_ZF      = (H'*H) \ (H');
+        x_hat_ZF  = G_ZF * y;
+
+        alpha     = K_D / SNR_D;
+        G_RZF     = (H'*H + alpha*eye(K_D)) \ (H');
+        x_hat_RZF = G_RZF * y;
+
+        rx_bits_ZF  = de2bi(qamdemod(x_hat_ZF,  mod_order, ...
+                            'UnitAveragePower',true), num_bits_per_sym,'left-msb');
+        rx_bits_RZF = de2bi(qamdemod(x_hat_RZF, mod_order, ...
+                            'UnitAveragePower',true), num_bits_per_sym,'left-msb');
+
+        err_ZF  = err_ZF  + sum(sum(rx_bits_ZF  ~= tx_bits));
+        err_RZF = err_RZF + sum(sum(rx_bits_RZF ~= tx_bits));
+    end
+
+    total_bits_M       = num_symbols * K_D * num_bits_per_sym;
+    BER_ZF_M(m_idx)   = err_ZF  / total_bits_M;
+    BER_RZF_M(m_idx)  = err_RZF / total_bits_M;
+
+    fprintf('M = %3d | BER_ZF = %.5f | BER_RZF = %.5f\n', ...
+            Mm, BER_ZF_M(m_idx), BER_RZF_M(m_idx));
+end
+
+%% ── PLOT D (FIXED — cleaner x-axis labels) ──────────────────────
+figure('Name','Plot D: BER vs Antennas M','Color','white','Position',[820 580 750 450]);
+
+semilogy(M_sweep_D, max(BER_ZF_M,  1e-6), 'r-o', 'LineWidth',2.5, ...
+         'MarkerSize',8, 'MarkerFaceColor','r', 'DisplayName','Vanilla ZF');
+hold on;
+semilogy(M_sweep_D, max(BER_RZF_M, 1e-6), 'b-s', 'LineWidth',2.5, ...
+         'MarkerSize',8, 'MarkerFaceColor','b', ...
+         'DisplayName','Regularized ZF (MMSE-type)');
+
+xline(K_D, 'k--','LineWidth',1.5, ...
+      'DisplayName', sprintf('M = K = %d  (minimum viable)',K_D));
+
+% Shade massive MIMO regime
+x_shade = [4*K_D  M_sweep_D(end)  M_sweep_D(end)  4*K_D];
+y_shade = [1e-7   1e-7            1               1    ];
+patch(x_shade, y_shade, [0.8 0.9 1], 'FaceAlpha',0.2, 'EdgeColor','none', ...
+      'DisplayName','Massive MIMO regime (M \geq 4K)');
+
+grid on;
+xlabel('Number of BS Antennas M', 'FontSize',13,'FontWeight','bold');
+ylabel('Bit Error Rate (BER)',     'FontSize',13,'FontWeight','bold');
+title(sprintf('BER vs Antennas  |  K=%d users, SNR=%d dB  |  16-QAM', K_D, SNR_D_dB), ...
+      'FontSize',14);
+legend('Location','northeast','FontSize',10);
+xlim([M_sweep_D(1)-4   M_sweep_D(end)+10]);
+ylim([1e-6  1]);
+
+% FIX: Use fewer ticks and horizontal labels to avoid overlap
+set(gca, 'XTick', [32 48 64 96 128 192 256], 'FontSize',10);
+xtickangle(0);   % Keep horizontal — fewer ticks = no overlap now
+
+text(140, 1e-2, ...
+     {'As M \uparrow\uparrow:', 'Array gain \uparrow', ...
+      'ZF \approx RZF  (both good)'}, ...
+     'Color',[0 0.4 0.8],'FontSize',9,'BackgroundColor','white');
+
+%% ================================================================
+%  SECTION E — SUMMARY FIGURE (all 4 subplots on one canvas)
+%  Uses the variables already computed above — no re-simulation needed
+%  FIX: use M_sweep_D (not M_plot) consistently throughout
+%% ================================================================
+figure('Name','Summary: All Results','Color','white','Position',[200 100 1200 800]);
+
+%% Subplot 1: BER vs SNR
+subplot(2,2,1);
+semilogy(SNR_dB_vec, max(BER_ZF_snr,  1e-6), 'r-o','LineWidth',2,'DisplayName','ZF');
+hold on;
+semilogy(SNR_dB_vec, max(BER_RZF_snr, 1e-6), 'b-s','LineWidth',2,'DisplayName','RZF');
+semilogy(SNR_dB_vec, max(BER_16QAM_theory,1e-6), 'k--','LineWidth',1.2,'DisplayName','Ideal');
+grid on;
+ylim([1e-6 1]);
+xlabel('SNR (dB)','FontSize',11);
+ylabel('BER','FontSize',11);
+title(sprintf('BER vs SNR | M=%d, K=%d',M,K),'FontSize',11);
+legend('Location','southwest','FontSize',8);
+
+%% Subplot 2: BER vs Users
+subplot(2,2,2);
+semilogy(K_sweep, max(BER_ZF_K,  1e-6), 'r-o','LineWidth',2,'DisplayName','ZF');
+hold on;
+semilogy(K_sweep, max(BER_RZF_K, 1e-6), 'b-s','LineWidth',2,'DisplayName','RZF');
+xline(M,'k--','LineWidth',1.5,'DisplayName',sprintf('K=M=%d',M));
+grid on;
+ylim([1e-6 1]);
+xlabel('Number of Users K','FontSize',11);
+ylabel('BER','FontSize',11);
+title(sprintf('BER vs Users | M=%d, SNR=%ddB',M,SNR_B_dB),'FontSize',11);
+legend('Location','northwest','FontSize',8);
+
+%% Subplot 3: Condition Number
+subplot(2,2,3);
+semilogy(K_cond_range, cond_mean, 'm-^','LineWidth',2,'DisplayName','\kappa mean');
+hold on;
+yline(1000,'r:','LineWidth',1.5,'DisplayName','\kappa=10^3');
+xline(M,   'k--','LineWidth',1.5,'DisplayName',sprintf('K=M=%d',M));
+grid on;
+xlabel('Number of Users K','FontSize',11);
+ylabel('\kappa(H^HH)','FontSize',11);
+title(sprintf('Condition Number vs K | M=%d',M),'FontSize',11);
+legend('Location','northwest','FontSize',8);
+set(gca, 'YScale','log');
+
+%% Subplot 4: BER vs Antennas  ← FIX: use M_sweep_D correctly
+subplot(2,2,4);
+semilogy(M_sweep_D, max(BER_ZF_M,  1e-6), 'r-o','LineWidth',2,'DisplayName','ZF');
+hold on;
+semilogy(M_sweep_D, max(BER_RZF_M, 1e-6), 'b-s','LineWidth',2,'DisplayName','RZF');
+grid on;
+xlabel('Number of Antennas M','FontSize',11);
+ylabel('BER','FontSize',11);
+title(sprintf('BER vs Antennas | K=%d, SNR=%ddB',K_D,SNR_D_dB),'FontSize',11);
+set(gca,'XTick',M_sweep_D);
+xtickangle(45);
+legend('Location','northeast','FontSize',8);
+
+sgtitle('Massive MIMO: Vanilla ZF vs Regularized ZF  |  16-QAM, Rayleigh Fading', ...
+        'FontSize',14,'FontWeight','bold');
+
+fprintf('\n=== Simulation Complete. All 5 figures generated. ===\n');
